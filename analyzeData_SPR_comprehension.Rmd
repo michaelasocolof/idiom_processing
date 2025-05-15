@@ -1,0 +1,319 @@
+
+```{r setup, include=FALSE}
+# some basic settings for this .Rmd file
+knitr::opts_chunk$set(echo = TRUE, cache=F)
+```
+
+```{r,echo=F,warning=F,message=F,cache=F}
+require(jsonlite)
+require(tidyverse)
+library(ggplot2)
+library(lmtest)
+library(lme4)
+library(lmerTest)
+library(arm)
+library(car)
+library(sjPlot)
+library(reshape2)
+library(rstatix)
+
+# avoids that `select` from MASSinstead of dplyr is used:
+select <- dplyr::select
+# by default, show only 3 digits:
+options(digits=3)
+
+data_stickiness = read.csv('prosody_stickiness_scores.csv')
+data_conventionality = read.csv('prosody_bert_scores.csv')
+
+experiment_surprisals = read.csv('experiment_surprisal_scores_GPT3.5_prosody.csv')
+idiom_corpus_surprisals = read.csv('idiom_corpus_surprisal_scores_prosody.csv')
+nonidiom_corpus_surprisals = read.csv('nonidiom_corpus_surprisal_scores_prosody.csv')
+```
+
+```{r,echo=F,message=F}
+
+# User-defined function to read in PCIbex Farm results files
+read.pcibex <- function(filepath, auto.colnames=TRUE, fun.col=function(col,cols){cols[cols==col]<-paste(col,"Ibex",sep=".");return(cols)}) {
+  n.cols <- max(count.fields(filepath,sep=",",quote=NULL),na.rm=TRUE)
+  if (auto.colnames){
+    cols <- c()
+    con <- file(filepath, "r")
+    while ( TRUE ) {
+      line <- readLines(con, n = 1, warn=FALSE)
+      if ( length(line) == 0) {
+        break
+      }
+      m <- regmatches(line,regexec("^# (\\d+)\\. (.+)\\.$",line))[[1]]
+      if (length(m) == 3) {
+        index <- as.numeric(m[2])
+        value <- m[3]
+        if (is.function(fun.col)){
+         cols <- fun.col(value,cols)
+        }
+        cols[index] <- value
+        if (index == n.cols){
+          break
+        }
+      }
+    }
+    close(con)
+    return(read.csv(filepath, comment.char="#", header=TRUE, col.names=cols))
+  }
+  else{
+    return(read.csv(filepath, comment.char="#", header=TRUE, col.names=seq(1:n.cols)))
+  }
+}
+
+# Read in results file
+results <- read.pcibex('spr_results.csv')
+
+```
+
+```{r,echo=F,message=F}
+
+#Organize dataframe for analysis
+tidied_results <- results %>%
+  filter(PennElementName == "DashedSentence" | PennElementName == "keypress") %>%
+  select(id, PennElementName, Parameter, Value, EventTime, Reading.time, itemNumber, StimulusType, phrase, startWord, endWord, answer, Sentence..or.sentence.MD5.) %>%
+  group_by(id, itemNumber) %>%
+  mutate(selection = case_when("Y" %in% Value ~ "Y",
+                               "N" %in% Value ~ "N",
+                               FALSE ~ "")) %>%
+  ungroup() %>%
+  filter(PennElementName != "keypress") %>%
+  select(-PennElementName) %>%
+  mutate(selection = case_when(answer == "" ~ "",
+                               TRUE ~ selection))
+```
+
+```{r,echo=F,message=F}
+
+#Make tibble of average accuracy by participant
+tidied_results %>%
+  filter(answer != "") %>%
+  mutate(correct = if_else(selection == answer, 1, 0)) %>%
+  group_by(id) %>%
+  summarize(accuracy = sum(correct, na.rm = TRUE) / sum(!is.na(correct)), std = sd(correct, na.rm = TRUE))
+
+#Make tibble of accuracy for catch trials
+tidied_results %>%
+  filter(StimulusType == "catchtrial") %>%
+  mutate(correct = if_else(selection == answer, 1, 0)) %>%
+  group_by(id) %>%
+  summarize(accuracy = sum(correct, na.rm = TRUE) / sum(!is.na(correct)))
+```
+
+```{r,echo=F,message=F}
+
+#Make tibble of average reading time for V+N for idioms versus non-idioms
+tidied_results %>%
+  filter(Parameter == startWord | Parameter == startWord + 1 | Parameter == endWord | Parameter == endWord + 1) %>%
+  group_by(StimulusType, ) %>%
+  summarize(avg_rt = mean(as.numeric(Reading.time), na.rm = TRUE))
+  
+```
+
+```{r,echo=F,message=F}
+
+#Remove all data except the word before the target phrase to the word after, inclusive
+woi_results <- tidied_results %>%
+  filter(Parameter == startWord - 1 | Parameter == startWord | Parameter == startWord + 1 | Parameter == endWord | Parameter == endWord + 1 | Parameter == endWord + 2 | Parameter == endWord + 3 | Parameter == endWord + 4) %>%
+  mutate(woi_Parameter = #if_else(Parameter == startWord - 1, 1,
+                                 if_else(Parameter == startWord, 1,
+                                         if_else(startWord + 1 != endWord, 
+                                                 if_else(Parameter == startWord + 1, 2, 
+                                                 if_else (Parameter == endWord, 3, 
+                                                          if_else(Parameter == endWord + 1, 4,
+                                                                  if_else(Parameter == endWord + 2, 5,
+                                                                          if_else(Parameter == endWord + 3, 7,
+                                                                                  if_else(Parameter == endWord + 4, 8, 0)
+                                                                          )
+                                                                  )
+                                                          )
+                                                 )
+                                                 )
+                                         ,
+                                                 if_else (Parameter == endWord, 2, 
+                                                          if_else(Parameter == endWord + 1, 3,
+                                                                  if_else(Parameter == endWord + 2, 4,
+                                                                          if_else(Parameter == endWord + 3, 6,
+                                                                                  if_else(Parameter == endWord + 4, 7, 0)
+                                                                          )
+                                                                  )
+                                                          )
+                                                 )
+                                 )
+                                 #)
+         ),
+         phrase_length = endWord-startWord
+  )
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 57 | StimulusType != 'headmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 73 | StimulusType != 'headmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 75 | StimulusType != 'headmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 79 | StimulusType != 'headmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 93 | StimulusType != 'nonheadmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 101 | StimulusType != 'nonheadmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 113 | StimulusType != 'headmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 45 | StimulusType != 'nonheadmatch')
+
+woi_results <- woi_results %>%
+  filter(itemNumber != 21 | StimulusType != 'idiom')
+
+```
+
+```{r,echo=F,message=F}
+
+phrase_len <- c(
+                    `1` = "No determiner",
+                    `2` = "Has determiner"
+                    )
+
+
+#Scatter plot of reading time by word, idiom vs headmatch vs nonheadmatch
+ggplot(woi_results, aes(x=as.numeric(woi_Parameter), y=as.numeric(Reading.time)/str_length(Value), group=StimulusType)) + geom_point(stat = "summary", fun = "mean") + stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) + geom_rect(aes(xmin=1, xmax=1+phrase_length,ymin=0, ymax=500), fill='grey', alpha= 0.01) + geom_line(stat = "summary", fun = "mean", aes(color=StimulusType)) + scale_x_continuous(labels=c('v-1', 'v', 'v+1', 'v+2', 'v+3', 'v+4')) + labs(x="Region", y="RT") + scale_color_manual(name="Condition", labels=c("Verb match","Idiom","Noun match"), values=c("dark orange","black","red")) + ylim(0,700) + facet_wrap(. ~ phrase_length, labeller = as_labeller(phrase_len)) + theme_classic() + theme(text=element_text(size=20), axis.text.x = element_text(angle=25))
+
+```
+
+```{r,echo=F,message=F}
+
+woi_averages <- woi_results %>%
+  group_by(id, itemNumber, StimulusType) %>%
+  mutate(verb_rt = Reading.time[woi_Parameter == 1])
+
+woi_averages <- woi_averages %>%
+  group_by(id, itemNumber, StimulusType) %>%
+  mutate(det_rt = if (phrase_length == 2) {Reading.time[woi_Parameter == 2]} else {''})
+
+woi_averages <- woi_averages %>%
+  group_by(itemNumber, StimulusType, id) %>%
+  mutate(noun_rt = if (phrase_length == 1) {Reading.time[woi_Parameter == 2]} else {Reading.time[woi_Parameter == 3]})
+
+woi_averages <- woi_averages %>%
+  group_by(itemNumber, StimulusType, id) %>%
+  mutate(verb_spillover_rt = Reading.time[woi_Parameter == 2])
+
+woi_averages <- woi_averages %>%
+  group_by(itemNumber, StimulusType, id) %>%
+  mutate(spillover_rt = if (phrase_length == 1) {Reading.time[woi_Parameter == 3]} else {Reading.time[woi_Parameter == 4]})
+```
+
+```{r,echo=F,message=F}
+
+#only for plotting
+woi_averages <- woi_averages %>%
+  pivot_longer(cols=c('verb_rt', 'det_rt', 'noun_rt', 'spillover_rt'),
+                    names_to='word',
+                    values_to='rt')
+
+```
+
+```{r}
+experiment_surprisals_clean <- experiment_surprisals %>% filter(target_phrase != 'context')
+experiment_surprisals_clean <- experiment_surprisals_clean %>% subset(select = c(sentence, surprisal_score, target_phrase))
+
+experiment_surprisals_clean <- experiment_surprisals_clean %>% group_by(sentence, target_phrase) %>% mutate(surprisal = sum(surprisal_score))
+experiment_surprisals_clean <- experiment_surprisals_clean %>% subset(select = c(sentence, target_phrase, surprisal))
+experiment_surprisals_clean <- experiment_surprisals_clean[!duplicated(experiment_surprisals_clean$surprisal, experiment_surprisals_clean$target_phrase), ]
+
+experiment_surprisals_clean <- experiment_surprisals_clean %>% pivot_wider(names_from = target_phrase, values_from = surprisal)
+experiment_surprisals_clean <- experiment_surprisals_clean %>% rename("verb_surprisal" = "verb", "noun_surprisal" = "noun", "preverb_surprisal" = "preverb")
+
+names(experiment_surprisals_clean)[1] <- "Sentence..or.sentence.MD5."
+woi_averages <- merge(woi_averages, experiment_surprisals_clean, by='Sentence..or.sentence.MD5.')
+
+woi_averages <- mutate(woi_averages,
+              verb_surprisal_rescaled = rescale(verb_surprisal),
+              noun_surprisal_rescaled = rescale(noun_surprisal),
+              preverb_surprisal_rescaled = rescale(preverb_surprisal),
+              phrase_surprisal = verb_surprisal + noun_surprisal
+              )
+
+data_conventionality <-
+  subset(data_conventionality, select = c(sentence, head_conventionality_score, nonhead_conventionality_score))
+
+all_scores <- merge(data_stickiness, data_conventionality, by='sentence')
+
+all_scores2 <- all_scores
+
+all_scores2$idiom <- as.character(all_scores2$idiom)
+
+all_scores2[all_scores2 == "('bite', 'dust')"] <- "bite the dust"
+all_scores2[all_scores2 == "('break', 'mold')"] <- "break the mold"
+all_scores2[all_scores2 == "('call', 'shot')"] <- "call the shots"
+all_scores2[all_scores2 == "('clear', 'air')"] <- "clear the air"
+all_scores2[all_scores2 == "('get', 'sack')"] <- "get the sack"
+all_scores2[all_scores2 == "('cut', 'corner')"] <- "cut corners"
+all_scores2[all_scores2 == "('have', 'ball')"] <- "have a ball"
+all_scores2[all_scores2 == "('lead', 'field')"] <- "lead the field"
+all_scores2[all_scores2 == "('make', 'wave')"] <- "make waves"
+all_scores2[all_scores2 == "('pull', 'string')"] <- "pull strings"
+all_scores2[all_scores2 == "('rock', 'boat')"] <- "rock the boat"
+all_scores2[all_scores2 == "('run', 'show')"] <- "run the show"
+all_scores2[all_scores2 == "('spill', 'bean')"] <- "spill the beans"
+all_scores2[all_scores2 == "('strike', 'chord')"] <- "strike a chord"
+all_scores2[all_scores2 == "('lose', 'ground')"] <- "lose ground"
+all_scores2[all_scores2 == "('mean', 'business')"] <- "mean business"
+all_scores2[all_scores2 == "('raise', 'hell')"] <- "raise hell"
+all_scores2[all_scores2 == "('turn', 'tail')"] <- "turn tail"
+
+all_scores2$idiom <- as.factor(all_scores2$idiom)
+
+names(all_scores2)[1] <- "Sentence..or.sentence.MD5."
+
+#make BERT scores negative so they go in the intuitive direction
+all_scores2$head_conventionality_score <- all_scores2$head_conventionality_score * -1
+all_scores2$nonhead_conventionality_score <- all_scores2$nonhead_conventionality_score * -1
+
+woi_averages <- merge(woi_averages, all_scores2, by='Sentence..or.sentence.MD5.')
+
+woi_averages <- mutate(woi_averages,
+              stickiness_score_rescaled = rescale(stickiness_score),
+              head_conventionality_score_rescaled = rescale(head_conventionality_score),
+              nonhead_conventionality_score_rescaled = rescale(nonhead_conventionality_score),
+              rt_rescaled = rescale(Reading.time),
+              verb_rt_rescaled = rescale(verb_rt),
+              det_rt_rescaled = rescale(det_rt),
+              noun_rt_rescaled = rescale(noun_rt),
+              spillover_rt_rescaled = rescale(spillover_rt),
+              verb_spillover_rt_rescaled = rescale(verb_spillover_rt)
+              )
+
+```
+
+```{r}
+
+spr_verb_model_maximal <- lmer(as.numeric(as.character(verb_rt_rescaled))~verb_surprisal_rescaled + head_conventionality_score_rescaled + verb_surprisal_rescaled*head_conventionality_score_rescaled + (1|itemNumber) + (1 + verb_surprisal_rescaled + head_conventionality_score_rescaled + verb_surprisal_rescaled*head_conventionality_score_rescaled|id) + (1|phrase),data=woi_averages[woi_averages$StimulusType != "nonheadmatch" & woi_averages$woi_Parameter == 1,])
+#summary(spr_verb_model_maximal)
+
+spr_det_model_maximal <- lmer(as.numeric(as.character(det_rt_rescaled))~verb_surprisal_rescaled + head_conventionality_score_rescaled  + verb_surprisal_rescaled*head_conventionality_score_rescaled + (1|itemNumber) + (1 + verb_surprisal_rescaled + verb_surprisal_rescaled*head_conventionality_score_rescaled|id) + (1|phrase),data=woi_averages[woi_averages$StimulusType != "nonheadmatch" & woi_averages$woi_Parameter == 2 & woi_averages$phrase_length == 2,])
+#summary(spr_det_model_maximal)
+
+woi_averages_for_noun_model <- woi_averages %>%
+  filter((woi_Parameter == 2 & phrase_length == 1) | (woi_Parameter == 3 & phrase_length == 2) )
+
+spr_noun_model_maximal <- lmer(as.numeric(as.character(noun_rt_rescaled))~noun_surprisal_rescaled + nonhead_conventionality_score_rescaled + verb_surprisal_rescaled + head_conventionality_score_rescaled + noun_surprisal_rescaled*nonhead_conventionality_score_rescaled + verb_surprisal_rescaled*head_conventionality_score_rescaled + (1|itemNumber) + (1 + noun_surprisal_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled*nonhead_conventionality_score_rescaled + verb_surprisal_rescaled*head_conventionality_score_rescaled|id) + (1|phrase),data=woi_averages_for_noun_model[woi_averages_for_noun_model$StimulusType != "headmatch",])
+summary(spr_noun_model_maximal)
+
+woi_averages_for_spillover_model <- woi_averages %>%
+  filter((woi_Parameter == 3 & phrase_length == 1) | (woi_Parameter == 4 & phrase_length == 2) )
+
+spr_spillover_model_maximal <- lmer(as.numeric(as.character(spillover_rt_rescaled))~noun_surprisal_rescaled + nonhead_conventionality_score_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled*nonhead_conventionality_score_rescaled + verb_surprisal_rescaled*noun_surprisal_rescaled + (1|itemNumber) + (1 + noun_surprisal_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled*nonhead_conventionality_score_rescaled + verb_surprisal_rescaled*noun_surprisal_rescaled|id) + (1|phrase),data=woi_averages_for_spillover_model)
+summary(spr_spillover_model_maximal)
+
+```

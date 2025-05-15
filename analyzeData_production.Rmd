@@ -1,0 +1,325 @@
+
+```{r setup, include=FALSE}
+# some basic settings for this .Rmd file
+knitr::opts_chunk$set(echo = TRUE, cache=F)
+```
+
+```{r,echo=F,warning=F,message=F,cache=F}
+require(jsonlite)
+require(tidyverse)
+library(ggplot2)
+library(lmtest)
+library(lme4)
+library(lmerTest)
+library(arm)
+library(car)
+library(sjPlot)
+library(reshape2)
+library(rstatix)
+
+# avoids that `select` from MASSinstead of dplyr is used:
+select <- dplyr::select
+# by default, show only 3 digits:
+options(digits=3)
+
+data_stickiness = read.csv('prosody_stickiness_scores.csv')
+data_conventionality = read.csv('prosody_bert_scores.csv')
+
+experiment_surprisals = read.csv('experiment_surprisal_scores_GPT3.5_prosody.csv')
+idiom_corpus_surprisals = read.csv('idiom_corpus_surprisal_scores_prosody.csv')
+nonidiom_corpus_surprisals = read.csv('nonidiom_corpus_surprisal_scores_prosody.csv')
+```
+
+```{r,echo=F,message=F}
+# load some R functions:
+source('prosodylabRhelper.R')
+source('importJSONData.R')
+
+# Load your data
+#results = importData(c('plannedProduction'))
+results = importData(c('recordAndClickkMessage'))
+
+# experimental trials with participant information:
+d = results$data
+
+# experiment settings:
+experimentSettings = results$settings
+
+d = addAcoustics(d,"idiomsAcoustics.txt")
+
+```
+
+```{r}
+data_conventionality <-
+  subset(data_conventionality, select = c(sentence, head_conventionality_score, nonhead_conventionality_score))
+
+all_scores <- merge(data_stickiness, data_conventionality, by='sentence')
+
+all_scores2 <- all_scores
+
+all_scores2$idiom <- as.character(all_scores2$idiom)
+
+all_scores2[all_scores2 == "('bite', 'dust')"] <- "bite the dust"
+all_scores2[all_scores2 == "('break', 'mold')"] <- "break the mold"
+all_scores2[all_scores2 == "('call', 'shot')"] <- "call the shots"
+all_scores2[all_scores2 == "('clear', 'air')"] <- "clear the air"
+all_scores2[all_scores2 == "('get', 'sack')"] <- "get the sack"
+all_scores2[all_scores2 == "('cut', 'corner')"] <- "cut corners"
+all_scores2[all_scores2 == "('have', 'ball')"] <- "have a ball"
+all_scores2[all_scores2 == "('lead', 'field')"] <- "lead the field"
+all_scores2[all_scores2 == "('make', 'wave')"] <- "make waves"
+all_scores2[all_scores2 == "('pull', 'string')"] <- "pull strings"
+all_scores2[all_scores2 == "('rock', 'boat')"] <- "rock the boat"
+all_scores2[all_scores2 == "('run', 'show')"] <- "run the show"
+all_scores2[all_scores2 == "('spill', 'bean')"] <- "spill the beans"
+all_scores2[all_scores2 == "('strike', 'chord')"] <- "strike a chord"
+all_scores2[all_scores2 == "('lose', 'ground')"] <- "lose ground"
+all_scores2[all_scores2 == "('mean', 'business')"] <- "mean business"
+all_scores2[all_scores2 == "('raise', 'hell')"] <- "raise hell"
+all_scores2[all_scores2 == "('turn', 'tail')"] <- "turn tail"
+
+all_scores2$idiom <- as.factor(all_scores2$idiom)
+
+all_scores2 <- all_scores2 %>%
+  filter(idiom %in% item_averages$phrase)
+
+names(all_scores2)[1] <- "labText"
+
+#make BERT scores negative so they go in the intuitive direction
+all_scores2$head_conventionality_score <- all_scores2$head_conventionality_score * -1
+all_scores2$nonhead_conventionality_score <- all_scores2$nonhead_conventionality_score * -1
+
+all <- merge(clean_d, all_scores2, by='labText')
+
+all <- mutate(all,
+              stickiness_score_rescaled = rescale(stickiness_score),
+              head_conventionality_score_rescaled = rescale(head_conventionality_score),
+              nonhead_conventionality_score_rescaled = rescale(nonhead_conventionality_score),
+              duration.1_rescaled = rescale(duration.1),
+              duration.2_rescaled = rescale(duration.2),
+              phoneLength.1_rescaled = rescale(phoneLength.1),
+              phoneLength.2_rescaled = rescale(phoneLength.2),
+              )
+
+all <- mutate(all,
+                   condition_2_3 = ifelse(condition.x == 2 | condition.x == 3,2,1))
+
+all <-
+  subset(all, select = c(idiom, labText, condition.x, condition.y, itemNumber, participant, duration.1, duration.1_rescaled, duration.2, duration.2_rescaled, phoneLength.1, phoneLength.1_rescaled, phoneLength.2, phoneLength.2_rescaled, stickiness_score, stickiness_score_rescaled, head_conventionality_score, head_conventionality_score_rescaled, nonhead_conventionality_score, nonhead_conventionality_score_rescaled, MedialOrFinal, condition_2_3))
+
+```
+
+```{r}
+experiment_surprisals_clean <- experiment_surprisals %>% filter(target_phrase != 'context')
+experiment_surprisals_clean <- experiment_surprisals_clean %>% subset(select = c(sentence, surprisal_score, target_phrase))
+
+experiment_surprisals_clean <- experiment_surprisals_clean %>% group_by(sentence, target_phrase) %>% mutate(surprisal = sum(surprisal_score))
+experiment_surprisals_clean <- experiment_surprisals_clean %>% subset(select = c(sentence, target_phrase, surprisal))
+experiment_surprisals_clean <- experiment_surprisals_clean[!duplicated(experiment_surprisals_clean$surprisal, experiment_surprisals_clean$target_phrase), ]
+
+experiment_surprisals_clean <- experiment_surprisals_clean %>% pivot_wider(names_from = target_phrase, values_from = surprisal)
+experiment_surprisals_clean <- experiment_surprisals_clean %>% rename("verb_surprisal" = "verb", "noun_surprisal" = "noun", "preverb_surprisal" = "preverb")
+
+names(experiment_surprisals_clean)[1] <- "labText"
+all <- merge(all, experiment_surprisals_clean, by='labText')
+
+all <- mutate(all,
+              verb_surprisal_rescaled = rescale(verb_surprisal),
+              noun_surprisal_rescaled = rescale(noun_surprisal),
+              preverb_surprisal_rescaled = rescale(preverb_surprisal),
+              phrase_surprisal = verb_surprisal + noun_surprisal
+              )
+
+all$condition_2_3 <- as.factor(all$condition_2_3)
+```
+
+```{r}
+#compare surprisal means across conditions
+mean(filter(all, condition_2_3 == 1, phrase_surprisal != 'NA')$phrase_surprisal)
+mean(filter(all, condition_2_3 == 2, phrase_surprisal != 'NA')$phrase_surprisal)
+
+mean(filter(all, condition.y == 'idiom', verb_surprisal != 'NA')$verb_surprisal)
+mean(filter(all, condition.y == 'verbmatch', verb_surprisal != 'NA')$verb_surprisal)
+
+mean(filter(all, condition.y == 'idiom', noun_surprisal != 'NA')$noun_surprisal)
+mean(filter(all, condition.y == 'nounmatch', noun_surprisal != 'NA')$noun_surprisal)
+
+#compare compositionality means across conditions
+mean(filter(all, condition.y == 'idiom')$head_conventionality_score)
+mean(filter(all, condition.y == 'verbmatch')$head_conventionality_score)
+mean(filter(all, condition.y == 'idiom')$nonhead_conventionality_score)
+mean(filter(all, condition.y == 'nounmatch')$non---head_conventionality_score)
+
+```
+
+```{r}
+
+ggplot(all %>% filter(condition.y != 'nounmatch'),
+       aes(x=condition.y, y=duration.1/phoneLength.1)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Duration (s)") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim=c(0.088,0.093))#coord_cartesian(ylim=c(2.88, 6.5))
+  
+ggplot(all %>% filter(condition.y != 'verbmatch'),
+       aes(x=condition.y, y=duration.2/phoneLength.2)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Duration (s)") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  +
+  coord_cartesian(ylim=c(0.116,0.121))
+  
+#Surprisal plots
+ggplot(all,
+       aes(x=condition_2_3, y=verb_surprisal + noun_surprisal)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Surprisal (bits)") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggplot(all %>% filter(condition.y != 'nounmatch'),
+       aes(x=condition.y, y=verb_surprisal)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Surprisal (bits)") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim=c(2.88,6.5))
+
+ggplot(all %>% filter(condition.y != 'verbmatch'),
+       aes(x=condition.y, y=noun_surprisal)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Surprisal (bits)") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim=c(2.88,6.5))
+
+#Conventionality plots
+ggplot(all %>% filter(condition.y != 'nounmatch'),
+       aes(x=condition.y, y=head_conventionality_score)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Conventionality") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim=c(-52,-27))
+
+ggplot(all %>% filter(condition.y != 'verbmatch'),
+       aes(x=condition.y, y=nonhead_conventionality_score)) +
+  geom_point(stat = "summary", fun = "mean", width = 0.5) +
+  stat_summary(fun.all = "mean_cl_boot", geom="errorbar", size=0.6, width=.15) +
+  theme_bw(base_size = 32) + 
+  labs(x = "Condition", y = "Conventionality") +
+  scale_x_discrete(labels=c('Idioms', 'Literal phrases')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim=c(-52,-27))
+```
+
+```{r}
+
+summarise(all %>% filter(condition.y == 'idiom'), mean = mean(duration.1+duration.2))
+summarise(all %>% filter(condition.y != 'idiom'), mean = mean(duration.1+duration.2))
+
+all %>% distinct(labText, .keep_all=TRUE)
+
+
+```
+
+```{r}
+#t.test(phrase_surprisal ~ condition_2_3, data=filter(all))
+#t.test(verb_surprisal ~ condition.y, data=filter(all %>% filter(condition.y != 'nounmatch')))
+#t.test(noun_surprisal ~ condition.y, data=filter(all %>% filter(condition.y != 'verbmatch')))
+
+t.test(head_conventionality_score ~ condition.y, data=filter(all %>% filter(condition.y != 'nounmatch')))
+t.test(nonhead_conventionality_score ~ condition.y, data=filter(all %>% filter(condition.y != 'verbmatch')))
+```
+
+```{r}
+
+#length(filter(all, condition.y != 'nounmatch')$verb_surprisal)
+#length(filter(all, condition.y != 'nounmatch')$head_conventionality_score)
+
+#cor_all <- all %>% distinct(labText, .keep_all=TRUE)
+
+#cor.test(filter(cor_all, condition.y != 'nounmatch')$phrase_surprisal, filter(cor_all, condition.y != 'nounmatch')$head_conventionality_score_rescaled, method=c("pearson"))
+
+cor.test(cor_all$verb_surprisal_rescaled, cor_all$head_conventionality_score_rescaled, method=c("pearson"))
+cor.test(cor_all$noun_surprisal_rescaled, cor_all$nonhead_conventionality_score_rescaled, method=c("pearson"))
+
+#VERB MODEL
+#model1 <- lmer(duration.1_rescaled~verb_surprisal_rescaled + head_conventionality_score_rescaled + verb_surprisal_rescaled:head_conventionality_score_rescaled + preverb_surprisal_rescaled + MedialOrFinal + (1|itemNumber) + (1|participant) + (1|idiom),data=all)#[!is.na(all$preverb_surprisal),])
+#summary(model1)
+#plot_model(model1, type = "pred", terms = c("head_conventionality_score_rescaled", "verb_surprisal_rescaled"))
+
+#NOUN MODEL
+#model2 <- lmer(duration.2_rescaled~noun_surprisal_rescaled + nonhead_conventionality_score_rescaled + noun_surprisal_rescaled:nonhead_conventionality_score_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled:verb_surprisal_rescaled + MedialOrFinal + (1|itemNumber) + (1|participant) + (1|idiom),data=all)
+#summary(model2)
+#plot_model(model2, type = "pred", terms = c("noun_surprisal_rescaled", "verb_surprisal_rescaled"))
+
+#FULL PHRASE MODEL
+#model_full <- lmer((duration.1_rescaled+duration.2_rescaled)/(phoneLength.1_rescaled+phoneLength.2_rescaled)~verb_surprisal_rescaled + noun_surprisal_rescaled + preverb_surprisal_rescaled + head_conventionality_score_rescaled + #nonhead_conventionality_score_rescaled + 
+  #                   MedialOrFinal + (1|itemNumber) + (1|participant) + (1|idiom),data=all)
+#summary(model_full)
+#plot_model(model_full, type = "pred", terms = c("nonhead_conventionality_score_rescaled", "noun_surprisal_rescaled"))
+
+
+#plot_model(model1, type = "pred", terms = c("head_conventionality_score_rescaled", "verb_surprisal_rescaled"), title= "", axis.title = c("Verb conventionality","Verb duration"), legend.title="Verb surprisal") +
+ # scale_linetype_manual(labels = c("Low", "Mid", "High"), values=c("solid", "dashed", "dotted")) +
+  #  theme_bw() +
+   # theme(text = element_text(size = 16),
+    #    axis.text = element_text(colour = "black"),
+     #   legend.position = "top", panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+#plot_model(model2, type = "pred", terms = c("noun_surprisal_rescaled", "verb_surprisal_rescaled"), title= "", axis.title = c("Noun surprisal","Noun duration"), legend.title="Verb surprisal") +
+ # scale_linetype_manual(labels = c("Low", "Mid", "High"), values=c("solid", "dashed", "dotted")) +
+  #  theme_bw() +
+   # theme(text = element_text(size = 16),
+    #    axis.text = element_text(colour = "black"),
+     #   legend.position = "top", panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+
+```
+
+```{r}
+
+#VERB MODEL
+model1_maximal <- lmer(duration.1_rescaled~verb_surprisal_rescaled + head_conventionality_score_rescaled + verb_surprisal_rescaled:head_conventionality_score_rescaled + preverb_surprisal_rescaled + MedialOrFinal + (1|itemNumber) + (1 + verb_surprisal_rescaled + verb_surprisal_rescaled:head_conventionality_score_rescaled|participant) + (1 + preverb_surprisal_rescaled + MedialOrFinal|idiom),data=all)#[!is.na(all$preverb_surprisal),])
+summary(model1_maximal)
+#plot_model(model1_maximal, type = "pred", terms = c("head_conventionality_score_rescaled", "verb_surprisal_rescaled"))
+
+#NOUN MODEL
+model2_maximal <- lmer(duration.2_rescaled~noun_surprisal_rescaled + nonhead_conventionality_score_rescaled + noun_surprisal_rescaled:nonhead_conventionality_score_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled:verb_surprisal_rescaled + MedialOrFinal + (1|itemNumber) + (1 + noun_surprisal_rescaled + verb_surprisal_rescaled + noun_surprisal_rescaled:nonhead_conventionality_score_rescaled|participant) + (1 + verb_surprisal_rescaled + MedialOrFinal|idiom),data=all)
+summary(model2_maximal)
+#plot_model(model2_maximal, type = "pred", terms = c("noun_surprisal_rescaled", "verb_surprisal_rescaled"))
+
+```
+
+```{r}
+
+plot_model(model1_maximal, type = "pred", terms = c("head_conventionality_score_rescaled", "verb_surprisal_rescaled"), title= "", axis.title = c("Verb conventionality","Verb duration"), legend.title="Verb surprisal") +
+  scale_linetype_manual(labels = c("Low", "Mid", "High"), values=c("solid", "dashed", "dotted")) +
+    theme_bw() +
+    theme(text = element_text(size = 16),
+        axis.text = element_text(colour = "black"),
+        legend.position = "top", panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+plot_model(model2_maximal, type = "pred", terms = c("noun_surprisal_rescaled", "verb_surprisal_rescaled"), title= "", axis.title = c("Noun surprisal","Noun duration"), legend.title="Verb surprisal") +
+  scale_linetype_manual(labels = c("Low", "Mid", "High"), values=c("solid", "dashed", "dotted")) +
+    theme_bw() +
+    theme(text = element_text(size = 16),
+        axis.text = element_text(colour = "black"),
+        legend.position = "top", panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+
+```
